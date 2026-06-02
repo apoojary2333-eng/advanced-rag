@@ -11,9 +11,17 @@ from postretrieval.reranker   import CrossEncoderReranker
 from generation.generator     import RAGGenerator
 from langchain_core.documents import Document
 
+# --- Safety / resource limits ---
+MAX_EXPANDED_QUERIES = 4
+MAX_CANDIDATES = 50
+TOP_K_RETRIEVAL_PER_QUERY = 15
+DEDUP_PREFIX_CHARS = 120
+
+
 class AdvancedRAGPipeline:
 
     def __init__(self):
+
         self.vectorstore  = VectorStore()
         self.reranker     = CrossEncoderReranker()
         self.expander     = QueryExpander()
@@ -44,23 +52,28 @@ class AdvancedRAGPipeline:
         print(f"\nQuery: {question}")
 
         expanded_queries = self.expander.expand_with_hyde(question)
+        expanded_queries = expanded_queries[:MAX_EXPANDED_QUERIES]
         print(f"  Expanded into {len(expanded_queries)} queries")
 
         all_candidates = []
         for q in expanded_queries:
-            results = self.hybrid.retrieve(q, k=15, alpha=0.5)
+            results = self.hybrid.retrieve(q, k=TOP_K_RETRIEVAL_PER_QUERY, alpha=0.5)
             all_candidates.extend(results)
 
+        # Dedup + cap to reduce prompt-injection amplification and DoS risk
         seen, unique = set(), []
         for doc in all_candidates:
             key = doc.page_content[:100]
             if key not in seen:
                 seen.add(key)
                 unique.append(doc)
+                if len(unique) >= MAX_CANDIDATES:
+                    break
 
-        print(f"  {len(unique)} unique candidates after dedup")
+        print(f"  {len(unique)} unique candidates after dedup/cap")
 
         top_docs = self.reranker.rerank(question, unique, top_k=5)
+
         result   = self.generator.generate(question, top_docs)
         return result
 
